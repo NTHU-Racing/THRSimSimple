@@ -5,6 +5,7 @@ only reads node data under `node.lock` and sends commands via `node.request`.
 """
 import logging
 import math
+import time
 import tkinter as tk
 import traceback
 from tkinter import ttk
@@ -44,9 +45,10 @@ class SimCtrlGui:
     def __init__(self, node):
         self.node = node
         self.root = tk.Tk()
-        self.root.title('THR Sim Control')
-        self.root.geometry('1500x920')
-        self.root.minsize(1180, 780)
+        self.root.title('THR | Driverless Lab')
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        self.root.geometry(f'{min(1560, sw - 60)}x{min(980, sh - 90)}')
+        self.root.minsize(1100, 720)
         self.root.configure(background='#eef2f7')
         self.root.protocol('WM_DELETE_WINDOW', self.close)
         self.root.report_callback_exception = self._on_callback_error
@@ -60,21 +62,65 @@ class SimCtrlGui:
         self._configure_style(style)
         header = ttk.Frame(self.root, style='Header.TFrame', padding=(20, 12))
         header.pack(side=tk.TOP, fill=tk.X)
-        title = 'Evaluation studio' if node.eval_mode else 'Vehicle simulator'
+        title = 'Evaluation bench' if node.eval_mode else 'Driverless lab'
         ttk.Label(header, text=title, style='Title.TLabel').pack(side=tk.LEFT)
-        ttk.Label(header, text='THR  /  BICYCLE MODEL', style='Header.TLabel').pack(side=tk.RIGHT)
+        ttk.Label(header, text='THR  /  CONTROL SYSTEMS', style='Header.TLabel').pack(side=tk.RIGHT)
+        ttk.Label(header, text='  /  test · measure · improve',
+                  style='Header.TLabel').pack(side=tk.LEFT, padx=12)
         self.status_text = tk.StringVar(value='Waiting for telemetry')
         ttk.Label(self.root, textvariable=self.status_text, style='Footer.TLabel',
                   padding=(16, 6)).pack(side=tk.BOTTOM, fill=tk.X)
 
+        self._build_metrics()
+        self.workspace = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
+        self.workspace.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
         self._build_plot()
         self._build_panel()
         self._bind_keys()
         self._after_id = self.root.after(UPDATE_MS, self.update)
 
+    def _build_metrics(self):
+        strip = ttk.Frame(self.root, padding=(12, 10))
+        strip.pack(fill=tk.X)
+        self.metrics = {}
+        for i, (key, label, unit) in enumerate((
+                ('speed', 'ACTUAL SPEED', 'm/s'), ('steer', 'ACTUAL STEERING', 'deg'),
+                ('error', 'PATH ERROR', 'm'), ('elapsed', 'RUN TIME', 's'))):
+            strip.columnconfigure(i, weight=1, uniform='metrics')
+            card = ttk.Frame(strip, style='Card.TFrame', padding=(16, 10))
+            card.grid(row=0, column=i, sticky='ew', padx=(0 if i == 0 else 8, 0))
+            ttk.Label(card, text=label, style='Caption.TLabel').pack(anchor='w')
+            row = ttk.Frame(card, style='Card.TFrame')
+            row.pack(fill=tk.X)
+            value = ttk.Label(row, text='—', style='Metric.TLabel')
+            value.pack(side=tk.LEFT)
+            ttk.Label(row, text=unit, style='Caption.TLabel').pack(side=tk.LEFT, padx=8)
+            self.metrics[key] = value
+
+    def _build_scorecards(self, parent):
+        row = ttk.Frame(parent)
+        row.pack(fill=tk.X, pady=(10, 6))
+        self.scorecards = {}
+        for i, (key, title, maximum, color) in enumerate(zip(
+                ('tracking', 'time_score', 'stop'), ('TRACKING', 'FINISH TIME', 'STOPPING'),
+                self._maxima(), ('#2563eb', '#0d9488', '#d97706'))):
+            row.columnconfigure(i, weight=1, uniform='scores')
+            card = ttk.Frame(row, style='Card.TFrame', padding=(12, 10))
+            card.grid(row=0, column=i, sticky='nsew', padx=(0 if i == 0 else 6, 0))
+            ttk.Label(card, text=title, style='Caption.TLabel').pack(anchor='w')
+            value = ttk.Label(card, text=f'— / {maximum}', style='Score.TLabel', foreground=color)
+            value.pack(anchor='w', pady=(5, 0))
+            self.scorecards[key] = (value, maximum)
+
     def _configure_style(self, style):
         style.configure('.', font=('DejaVu Sans', 10), background='#eef2f7',
                         foreground='#243247')
+        style.configure('Card.TFrame', background='white')
+        style.configure('Caption.TLabel', background='white', foreground='#64748b',
+                        font=('DejaVu Sans', 8, 'bold'))
+        style.configure('Metric.TLabel', background='white', foreground='#14243a',
+                        font=('DejaVu Sans', 22, 'bold'))
+        style.configure('Score.TLabel', background='white', font=('DejaVu Sans', 16, 'bold'))
         style.configure('TFrame', background='#eef2f7')
         style.configure('TLabel', background='#eef2f7')
         style.configure('TLabelframe', background='#eef2f7', borderwidth=1,
@@ -83,8 +129,11 @@ class SimCtrlGui:
                         font=('DejaVu Sans', 10, 'bold'))
         style.configure('TButton', padding=(10, 8), background='#e0e7f0', borderwidth=0)
         style.map('TButton', background=[('active', '#cdd8e8')])
-        style.configure('Primary.TButton', background='#2563eb', foreground='white')
-        style.map('Primary.TButton', background=[('active', '#1d4ed8')])
+        style.configure('Primary.TButton', background='#0f766e', foreground='white',
+                        font=('DejaVu Sans', 10, 'bold'))
+        style.map('Primary.TButton', background=[('active', '#115e59')])
+        style.configure('Danger.TButton', foreground='#b42318', background='#fee8e7')
+        style.map('Danger.TButton', background=[('active', '#fecaca')])
         style.configure('Big.TLabel', font=('DejaVu Sans', 14, 'bold'))
         style.configure('Header.TFrame', background='#14243a')
         style.configure('Title.TLabel', background='#14243a', foreground='white',
@@ -118,15 +167,15 @@ class SimCtrlGui:
 
     # ------------------------------------------------------------- layout
     def _build_plot(self):
-        left = ttk.Frame(self.root, padding=(12, 12, 4, 6))
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        left = ttk.Frame(self.workspace, padding=(0, 0, 8, 0))
+        self.workspace.add(left, weight=3)
 
         self.fig = Figure(figsize=(8, 7), dpi=100, constrained_layout=True)
-        gs = self.fig.add_gridspec(5, 1)
-        self.ax = self.fig.add_subplot(gs[:3, 0])
-        self.ax_cte = self.fig.add_subplot(gs[3, 0])
-        self.ax_v = self.fig.add_subplot(gs[4, 0], sharex=self.ax_cte)
-        self.ax_steer = self.ax_v.twinx()
+        gs = self.fig.add_gridspec(4, 1, height_ratios=[4.0, 1.0, 1.0, 1.0])
+        self.ax = self.fig.add_subplot(gs[0, 0])
+        self.ax_cte = self.fig.add_subplot(gs[1, 0])
+        self.ax_v = self.fig.add_subplot(gs[2, 0], sharex=self.ax_cte)
+        self.ax_steer = self.fig.add_subplot(gs[3, 0], sharex=self.ax_cte)
 
         ax = self.ax
         ax.set_aspect('equal', adjustable='datalim')
@@ -165,7 +214,9 @@ class SimCtrlGui:
         # control signals: velocity (left axis) and steering angle (right axis)
         av, ast = self.ax_v, self.ax_steer
         av.grid(True, alpha=0.3)
-        av.set_xlabel(f'time relative to now [s]  (last {TIME_WINDOW:.0f} s)')
+        av.tick_params(labelbottom=False)
+        ast.set_xlabel(f'Time before now [s] · last {TIME_WINDOW:.0f} seconds')
+        ast.grid(True, alpha=0.25)
         av.set_ylabel('velocity [m/s]', color=V_COLOR)
         av.tick_params(axis='y', colors=V_COLOR)
         ast.set_ylabel('steer [deg]', color=STEER_COLOR)
@@ -177,8 +228,10 @@ class SimCtrlGui:
         (self.steer_line,) = ast.plot([], [], color=STEER_COLOR, lw=1.5, label='steer cmd')
         (self.steer_act_line,) = ast.plot([], [], '--', color=STEER_COLOR, lw=1.5,
                                           label='steer actual')
-        av.legend(handles=[self.v_line, self.v_act_line, self.steer_line, self.steer_act_line],
-                  loc='upper right', fontsize=7, ncol=2)
+        av.legend(handles=[self.v_line, self.v_act_line], loc='upper right',
+                  fontsize=7, ncol=2, framealpha=0.85)
+        ast.legend(handles=[self.steer_line, self.steer_act_line], loc='upper right',
+                   fontsize=7, ncol=2, framealpha=0.85)
         av.set_ylim(0, 32)  # avoid a redraw when cruise commands first arrive
         # wide enough for the full steering range (0.6 rad ~ 34 deg), so the axis
         # never has to grow (each growth is a slow full redraw)
@@ -241,9 +294,8 @@ class SimCtrlGui:
             self._need_full = True
 
     def _build_panel(self):
-        panel = ttk.Frame(self.root, padding=(10, 12, 12, 6), width=650)
-        panel.pack(side=tk.RIGHT, fill=tk.Y)
-        panel.pack_propagate(False)
+        panel = ttk.Frame(self.workspace, padding=(8, 0, 0, 0), width=620)
+        self.workspace.add(panel, weight=2)
 
         if self.node.eval_mode:
             self._build_eval_controls(panel)
@@ -251,7 +303,7 @@ class SimCtrlGui:
             self._build_sim_controls(panel)
 
         # --- view options
-        f = ttk.LabelFrame(panel, text='View', padding=8)
+        f = ttk.Frame(panel, padding=(4, 6))
         f.pack(fill=tk.X, pady=6)
         self.follow_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(f, text='Follow vehicle', variable=self.follow_var).pack(side=tk.LEFT)
@@ -267,10 +319,13 @@ class SimCtrlGui:
             self.conn_labels[key] = label
 
         tabs = ttk.Notebook(panel)
+        self.details_tabs = tabs
         tabs.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
         live_tab, results_tab = ttk.Frame(tabs, padding=8), ttk.Frame(tabs, padding=8)
-        tabs.add(live_tab, text='Live telemetry')
-        tabs.add(results_tab, text='Run history')
+        if self.node.eval_mode:
+            tabs.add(self.eval_summary, text='Path scores')
+        tabs.add(live_tab, text='Telemetry')
+        tabs.add(results_tab, text='Run results')
 
         # --- live status
         f = ttk.LabelFrame(live_tab, text='Vehicle telemetry', padding=12)
@@ -330,7 +385,7 @@ class SimCtrlGui:
         ttk.Button(btns, text='▶ Start', style='Primary.TButton', command=self.on_start).grid(row=0, column=0, sticky='we')
         ttk.Button(btns, text='Evaluate', command=self.on_evaluate) \
             .grid(row=0, column=1, sticky='we', padx=2)
-        ttk.Button(btns, text='■ Stop', command=lambda: self.node.request('stop')) \
+        ttk.Button(btns, text='■ Stop', style='Danger.TButton', command=lambda: self.node.request('stop')) \
             .grid(row=0, column=2, sticky='we')
         ttk.Button(btns, text='↺ Reset', command=lambda: self.node.request('reset')) \
             .grid(row=0, column=3, sticky='we', padx=(2, 0))
@@ -341,13 +396,39 @@ class SimCtrlGui:
             .grid(row=4, column=0, columnspan=2, sticky='w', pady=(4, 0))
 
     def _build_eval_controls(self, panel):
-        """Evaluation mode (evaluate.sh): start button, progress and a summary
+        """Evaluation mode (evaluate.bash): start button, progress and a summary
         instead of the path / runs / Start controls."""
         n = self.node
         f = ttk.LabelFrame(panel, text='Evaluation', padding=8)
         f.pack(fill=tk.X, pady=(0, 6))
-        self.eval_plan_lbl = ttk.Label(f, wraplength=600)
-        self.eval_plan_lbl.pack(anchor='w')
+        steps = ttk.Frame(f)
+        steps.pack(fill=tk.X, pady=(0, 8))
+        self.eval_steps = []
+        for text in ('1  SET UP', '2  RUN TESTS', '3  REVIEW'):
+            label = ttk.Label(steps, text=text, font=('DejaVu Sans', 9, 'bold'))
+            label.pack(side=tk.LEFT, padx=(0, 24))
+            self.eval_steps.append(label)
+
+        plan = ttk.Frame(f)
+        plan.pack(fill=tk.X)
+        self.eval_shape_vars = {}
+        self.eval_plan_widgets = []
+        for col, shape in enumerate(PATH_SHAPES):
+            var = tk.BooleanVar(value=shape in n.eval_shapes)
+            widget = ttk.Checkbutton(plan, text=shape.replace('_', ' ').title(), variable=var)
+            widget.grid(row=0, column=col, sticky='w', padx=(0, 8))
+            self.eval_shape_vars[shape] = var
+            self.eval_plan_widgets.append(widget)
+        ttk.Label(plan, text='Repeats per path').grid(row=1, column=0, columnspan=2,
+                                                     sticky='w', pady=(6, 0))
+        self.eval_repeats = tk.IntVar(value=n.eval_runs)
+        repeats = ttk.Spinbox(plan, from_=1, to=100, width=5, textvariable=self.eval_repeats)
+        repeats.grid(row=1, column=2, sticky='w', pady=(6, 0))
+        self.eval_plan_widgets.append(repeats)
+        self.eval_plan_lbl = ttk.Label(f, wraplength=560)
+        self.eval_plan_lbl.pack(anchor='w', pady=(6, 0))
+        self.eval_ready_lbl = ttk.Label(f, text='Checking connections…', wraplength=560)
+        self.eval_ready_lbl.pack(anchor='w', pady=(4, 0))
 
         btns = ttk.Frame(f)
         btns.pack(fill=tk.X, pady=(6, 4))
@@ -355,24 +436,33 @@ class SimCtrlGui:
         btns.columnconfigure(1, weight=1)
         btns.columnconfigure(2, weight=1)
         self.eval_btn = ttk.Button(btns, text='▶ Start evaluation', style='Primary.TButton',
-                                   command=lambda: n.request('evaluate', num_runs=n.eval_runs))
+                                   command=self.start_evaluation)
         self.eval_btn.grid(row=0, column=0, sticky='we')
-        ttk.Button(btns, text='■ Stop', command=lambda: n.request('stop')) \
-            .grid(row=0, column=1, sticky='we', padx=(2, 0))
+        self.eval_cancel_btn = ttk.Button(btns, text='Cancel evaluation', style='Danger.TButton',
+                                          command=lambda: n.request('stop'))
+        self.eval_cancel_btn.grid(row=0, column=1, sticky='we', padx=(2, 0))
         ttk.Button(btns, text='? Scoring rules', command=self.show_rules) \
             .grid(row=0, column=2, sticky='we', padx=(2, 0))
 
         self.eval_prog = ttk.Progressbar(f, maximum=1.0)
         self.eval_prog.pack(fill=tk.X, pady=(2, 2))
-        self.eval_prog_lbl = ttk.Label(f, text='–')
+        self.eval_prog_lbl = ttk.Label(f, text='–', font=('DejaVu Sans', 10, 'bold'))
         self.eval_prog_lbl.pack(anchor='w')
+        self.eval_feedback = ttk.Label(f, wraplength=560, foreground='#52657e')
+        self.eval_feedback.pack(anchor='w', pady=(4, 0))
 
+        self._build_scorecards(f)
         wt, wv, ws = self._maxima()
         cols = (('shape', 'Path', 88), ('done', 'Done', 50), ('ok', 'Stopped', 62),
                 ('track', 'Track', 72), ('time', 'Time', 66), ('stop', 'Stop', 62),
                 ('score', 'Score', 80), ('err', '|err| m', 62))
-        eval_frame = ttk.Frame(f)
-        eval_frame.pack(fill=tk.X, pady=(8, 0))
+        self.eval_summary = ttk.Frame(panel, padding=8)
+        self.eval_review_lbl = ttk.Label(self.eval_summary, wraplength=560, justify=tk.LEFT)
+        self.eval_review_lbl.pack(fill=tk.X, pady=(0, 8))
+        self.eval_report_lbl = ttk.Label(self.eval_summary, wraplength=560, foreground='#52657e')
+        self.eval_report_lbl.pack(fill=tk.X, pady=(0, 8))
+        eval_frame = ttk.Frame(self.eval_summary)
+        eval_frame.pack(fill=tk.BOTH, expand=True)
         self.eval_table = ttk.Treeview(eval_frame, columns=[c[0] for c in cols], show='headings',
                                        height=len(n.eval_shapes))
         for key, text, cw in cols:
@@ -477,34 +567,122 @@ Evaluation
     def _score_tag(score):
         return 'good' if score >= 80 else 'mid' if score >= 50 else 'bad'
 
+    def evaluation_plan(self):
+        """Editable test selection; invalid values keep Start disabled."""
+        shapes = [shape for shape, var in self.eval_shape_vars.items() if var.get()]
+        try:
+            repeats = int(self.eval_repeats.get())
+        except (ValueError, tk.TclError):
+            return shapes, 0
+        return shapes, repeats if 1 <= repeats <= 100 else 0
+
+    def start_evaluation(self):
+        shapes, repeats = self.evaluation_plan()
+        if shapes and repeats:
+            self.node.request('evaluate', shapes=shapes, num_runs=repeats)
+            self.eval_btn.state(['disabled'])  # absorb double clicks until the ROS tick
+
+    @staticmethod
+    def result_hint(result):
+        reason = result['result']
+        if reason == 'stopped':
+            err = result['stop_err'] or 0.0
+            where = 'past' if err >= 0 else 'before'
+            return f"Stopped {abs(err):.2f} m {where} finish · {result['score']:.1f}/100"
+        return {
+            'off_track': 'Off track — check steering sign, lookahead and speed.',
+            'overrun': 'Run-out exceeded — brake earlier before the finish.',
+            'timeout': 'Timed out — check commands and path progress.',
+            'aborted': 'Run interrupted.',
+        }.get(reason, reason)
+
     def _update_eval_panel(self, state, results, run_idx, run_total, shape, changed):
         n = self.node
+        phase = n.eval_phase
+        active = phase in ('WAITING', 'RUNNING', 'BETWEEN')
+        shapes, repeats = self.evaluation_plan()
+        valid = bool(shapes and repeats)
         per = n.eval_runs
-        self.eval_plan_lbl.configure(
-            text=f"{len(n.eval_shapes)} paths × {per} run(s): {', '.join(n.eval_shapes)}")
-        total = run_total if n.started else len(n.eval_shapes) * per
-        complete = n.started and state == DONE and len(results) >= total and not n.pending_eval
-        self.eval_prog['value'] = len(results) / total if total else 0.0
-        if n.pending_eval:
-            text = 'Waiting for vehicle_sim and a driver on /path…'
-        elif not n.started:
-            text = 'Press ▶ Start evaluation'
-        elif state in (SETTLING, RUNNING):
-            k = sum(r['shape'] == shape for r in results) + 1
-            text = f'Running {run_idx}/{total}: {shape} (run {k}/{per})'
-        elif complete:
-            text = f'Finished: {len(results)}/{total} runs'
-        else:
-            text = f'Stopped after {len(results)}/{total} runs'
-        self.eval_prog_lbl.configure(text=text)
-        self.eval_btn.configure(text='↻ Restart evaluation' if n.started or n.pending_eval
+        plan_shapes = n.eval_shapes if active or n.started else shapes
+        plan_repeats = per if active or n.started else repeats
+        total = run_total or len(plan_shapes) * plan_repeats
+        preview_shapes = n.eval_shapes if active else shapes
+        preview_repeats = per if active else repeats
+        self.eval_plan_lbl.configure(text=f"{len(preview_shapes)} paths × {preview_repeats} repeats · "
+                                          f"{len(preview_shapes) * preview_repeats} tests")
+        counts = n.connections()
+        missing = []
+        if not counts['state_pubs'] or not counts['reset_subs']:
+            missing.append('vehicle feedback')
+        if n.wait_driver and not counts['path_subs']:
+            missing.append('driver /path subscription')
+        if n.wait_driver and not counts['ctrl_pubs']:
+            missing.append('driver /veh_ctrl publisher')
+        ready_text = 'Ready: vehicle and driver connected' if not missing else 'Waiting for ' + ', '.join(missing)
+        self.eval_ready_lbl.configure(text=ready_text, foreground='#16815d' if not missing else '#b45309')
+        stage = 0 if phase in ('READY', 'WAITING') else 1 if active else 2
+        for i, label in enumerate(self.eval_steps):
+            label.configure(foreground='#0f766e' if i == stage else '#94a3b8')
+        for widget in self.eval_plan_widgets:
+            widget.state(['disabled'] if active else ['!disabled'])
+        self.eval_btn.configure(text='Run again' if phase in ('COMPLETE', 'CANCELLED')
                                 else '▶ Start evaluation')
+        self.eval_btn.state(['disabled'] if active or not valid else ['!disabled'])
+        self.eval_cancel_btn.state(['!disabled'] if active else ['disabled'])
+        self.eval_prog['value'] = len(results) / total if total else 0.0
+        if phase == 'WAITING':
+            text = 'Start requested · waiting for connections'
+        elif phase == 'BETWEEN':
+            deadline = n.next_run_at
+            remaining = max(0, math.ceil(deadline - time.monotonic())) if deadline is not None else 0
+            next_shape = n.run_queue[0].replace('_', ' ') if n.run_queue else ''
+            text = (f"Test {len(results)}/{total} recorded · next: {next_shape} in {remaining}s"
+                    if not missing else f"Test {len(results)}/{total} recorded · waiting for driver")
+        elif phase == 'RUNNING':
+            k = sum(r['shape'] == shape for r in results) + 1
+            action = 'Resetting vehicle' if state == SETTLING else 'Driving / stopping'
+            text = f'Test {run_idx}/{total} · {shape.replace("_", " ")} · repeat {k}/{per} · {action}'
+        elif phase == 'COMPLETE':
+            text = f'Evaluation complete · {len(results)}/{total} tests recorded'
+        elif phase == 'CANCELLED':
+            text = f'Cancelled · {len(results)}/{total} completed tests kept'
+        else:
+            text = 'Choose paths and repeats, then Start evaluation' if valid else 'Select a path and 1–100 repeats'
+        self.eval_prog_lbl.configure(text=text)
+        self.eval_feedback.configure(text=self.result_hint(results[-1]) if results else
+                                     'Your driver stays running. Each test sends a new path and reset.')
+        if phase in ('COMPLETE', 'CANCELLED'):
+            if getattr(self, '_reviewed_session', None) != (n.session, phase):
+                self.details_tabs.select(self.eval_summary)
+                self._reviewed_session = (n.session, phase)
+            stopped = sum(r['result'] == 'stopped' for r in results)
+            self.eval_review_lbl.configure(
+                text=f"{'Final results' if phase == 'COMPLETE' else 'Partial results'} · "
+                     f"{stopped}/{len(results)} tests ended stopped. "
+                     + ('Averages below use completed tests only.' if phase == 'CANCELLED' else
+                        'Inspect Run results for individual outcomes.'))
+        else:
+            self.eval_review_lbl.configure(text='Results appear here as each test finishes.')
+        if n.report_error:
+            report = 'Report could not be saved: ' + n.report_error
+        elif n.report_path:
+            report = 'Saved JSON: ' + n.report_path
+        elif phase in ('COMPLETE', 'CANCELLED') and not results:
+            report = 'No tests completed; no report generated.'
+        else:
+            report = ('Report will be saved when evaluation ends.' if n.results_file
+                      else 'Use evaluate.bash to save a JSON report.')
+        self.eval_report_lbl.configure(text=report)
 
         if not changed:
             return
+        for key, (widget, maximum) in self.scorecards.items():
+            mean = sum(r[key] for r in results) / len(results) if results else None
+            widget.configure(text=f'{mean * maximum / 100:.1f} / {maximum}'
+                             if mean is not None else f'— / {maximum}')
         summary = n.summarize(results)
         self.eval_table.delete(*self.eval_table.get_children())
-        for sh in n.eval_shapes:
+        for sh in plan_shapes:
             row = summary.get(sh)
             if row is None:
                 self.eval_table.insert('', tk.END, tags=('todo',),
@@ -700,6 +878,13 @@ Evaluation
             self.v_act_line.set_data([], [])
             self.steer_act_line.set_data([], [])
 
+        # Always-visible readings are independent of the telemetry tab.
+        self.metrics['speed'].configure(text=f'{act[0]:.2f}' if act else '—')
+        self.metrics['steer'].configure(text=f'{math.degrees(act[1]):+.1f}' if act else '—')
+        self.metrics['error'].configure(text=f"{cur.get('cte', 0.0):+.3f}" if veh else '—',
+                                       foreground='#b42318' if abs(cur.get('cte', 0.0)) > node.max_cte
+                                       else '#14243a')
+        self.metrics['elapsed'].configure(text=f"{cur.get('time', 0.0):.1f}")
         # panel
         label = f'{state}  (evaluating)' if node.evaluating and state != DONE else state
         self.state_lbl.configure(text=label, foreground=STATE_COLORS.get(state, 'black'))
@@ -730,11 +915,16 @@ Evaluation
             text=('–' if act is None else
                   f'v {act[0]:5.2f} m/s  δ {math.degrees(act[1]):5.1f}°'))
 
-        changed = len(results) != self._n_results
+        signature = (node.session, tuple((r['run'], r['shape'], r['score']) for r in results))
+        if self.node.eval_mode:
+            chosen, repeats = self.evaluation_plan()
+            signature += (tuple(chosen), repeats, node.eval_phase)
+        changed = signature != getattr(self, '_results_signature', None)
         if self.node.eval_mode:
             self._update_eval_panel(state, results, run_idx, num_runs, shape, changed)
         if changed:
             self._n_results = len(results)
+            self._results_signature = signature
             self.table.delete(*self.table.get_children())
             for r in results:
                 err = '–' if r['stop_err'] is None else f"{r['stop_err']:+.2f}"

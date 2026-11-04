@@ -82,6 +82,7 @@ class SimCtrlNode(Node):
         self.w_stop = max(0.0, 1.0 - self.w_track - self.w_time)
         self.time_v_max = p('time_v_max', 30.0).value   # full time points at this v_eq [m/s]
         self.eval_mode = p('eval_mode', False).value
+        self.inter_run_delay = max(0.0, p('inter_run_delay', 2.0).value)
         self.eval_shapes = [s.strip() for s in p('eval_shapes', ','.join(PATH_SHAPES)).value
                             .split(',') if s.strip()]
         self.results_file = p('results_file', '').value
@@ -120,6 +121,10 @@ class SimCtrlNode(Node):
         self.eval_runs = self.num_runs   # runs per path of the (last) evaluation
         self.pending_eval = False        # evaluation requested, waiting for the driver
         self.session = 0                 # increments with every Start / evaluation
+        self.eval_phase = 'READY'        # READY / WAITING / RUNNING / BETWEEN / COMPLETE / CANCELLED
+        self.next_run_at = None          # monotonic deadline for the next evaluation run
+        self.report_path = ''
+        self.report_error = ''
         self.started = False
         self.results = []
         self.veh = None            # (x, y, yaw)
@@ -216,6 +221,7 @@ class SimCtrlNode(Node):
             'reset_subs': self.reset_pub.get_subscription_count(),
             'state_pubs': self.count_publishers('/veh_state'),
             'ctrl_pubs': self.count_publishers('/veh_ctrl'),
+            'path_subs': self.path_pub.get_subscription_count(),
         }
 
     # ------------------------------------------- commands (from GUI thread)
@@ -224,16 +230,36 @@ class SimCtrlNode(Node):
 
     def _handle_command(self, cmd, kw):
         if cmd == 'start':      # num_runs runs on one shape
+            self.pending_eval = False
             shape = kw.get('shape') or self.shape
             self._start_session([shape] * int(kw.get('num_runs', self.num_runs)), False)
         elif cmd == 'evaluate':  # num_runs runs on every eval shape
-            self.eval_runs = int(kw.get('num_runs', self.num_runs))
-            self._discard_run()        # (re)start: drop a run in progress, unscored
-            self.pending_eval = True   # starts in on_tick once vehicle_sim and driver are up
-        elif cmd == 'stop':
-            self.pending_eval = False
-            self._abort()
+            shapes = list(kw.get('shapes', self.eval_shapes))
+            runs = int(kw.get('num_runs', self.num_runs))
+            if not shapes or any(shape not in PATH_SHAPES for shape in shapes) or runs < 1:
+                self.get_logger().warn('Select at least one valid path and at least one repeat.')
+                return
+            self._discard_run()
             self.publish_no_task()
+            with self.lock:
+                self.eval_shapes = list(dict.fromkeys(shapes))
+                self.eval_runs = runs
+                self.evaluating = True
+                self.results = []
+                self.run_idx = 0
+                self.run_total = len(self.eval_shapes) * runs
+                self.run_queue = []
+                self.state = IDLE
+                self.eval_phase = 'WAITING'
+                self.report_path = self.report_error = ''
+            self.pending_eval = True   # user requested; wait for the background driver
+        elif cmd == 'stop':
+            if self.evaluating and self.eval_phase in ('WAITING', 'RUNNING', 'BETWEEN'):
+                self._cancel_evaluation()
+            else:
+                self.pending_eval = False
+                self._abort()
+                self.publish_no_task()
         elif cmd == 'reset':
             self._reset_sim()
         elif cmd == 'shape':
@@ -244,12 +270,33 @@ class SimCtrlNode(Node):
 
     def _discard_run(self):
         """Drop the current session without scoring the run in progress
-        (used by Start / Restart evaluation)."""
+        (used by a fresh Start / Run again)."""
         self.run_queue = []
+        self.next_run_at = None
         if self.state in (SETTLING, RUNNING):
             with self.lock:
                 self.state = IDLE
-            self.get_logger().info(f'Run {self.run_idx} discarded: evaluation restarted.')
+            self.get_logger().info(f'Run {self.run_idx} discarded without scoring.')
+
+    def _cancel_evaluation(self):
+        # Only completed tests count. Cancelling never adds an 'aborted' score.
+        self.pending_eval = False
+        self._discard_run()
+        with self.lock:
+            self.state = DONE
+            self.eval_phase = 'CANCELLED'
+        self.publish_no_task()
+        self._save_session_report()
+        self.get_logger().info('Evaluation cancelled; completed results retained.')
+
+    def _save_session_report(self):
+        if not self.results:
+            return
+        try:
+            self._report()
+        except Exception as exc:
+            self.report_error = str(exc)
+            self.get_logger().error(f'Could not save evaluation results: {exc}')
 
     def _abort(self):
         self.run_queue = []
@@ -257,7 +304,12 @@ class SimCtrlNode(Node):
             self.finish_run('aborted')
 
     def _reset_sim(self):
-        self._abort()
+        if self.evaluating and self.eval_phase in ('WAITING', 'RUNNING', 'BETWEEN'):
+            self._cancel_evaluation()
+        else:
+            self._abort()
+        self.pending_eval = False
+        self.next_run_at = None
         self.publish_no_task()
         self.reset_pub.publish(Empty())
         with self.lock:
@@ -268,7 +320,7 @@ class SimCtrlNode(Node):
 
     # ------------------------------------------------------------ run cycle
     def _start_session(self, shapes, evaluating):
-        self._abort()
+        self._discard_run()
         with self.lock:
             self.results = []
             self.run_queue = list(shapes)
@@ -277,12 +329,18 @@ class SimCtrlNode(Node):
             self.evaluating = evaluating
         self.started = True
         self.session += 1
+        self.next_run_at = None
+        self.report_path = self.report_error = ''
+        self.eval_phase = 'RUNNING' if evaluating else 'READY'
         if evaluating:
             self.get_logger().info(
                 f'=== Evaluation: {len(shapes)} runs over {sorted(set(shapes), key=shapes.index)} ===')
         self._start_next()
 
     def _start_next(self):
+        self.next_run_at = None
+        if self.evaluating:
+            self.eval_phase = 'RUNNING'
         shape = self.run_queue.pop(0)
         if shape != self.shape:
             self.set_path(shape)
@@ -308,6 +366,9 @@ class SimCtrlNode(Node):
                 self.pending_eval = False
                 self._start_session(
                     [s for s in self.eval_shapes for _ in range(self.eval_runs)], True)
+        elif self.evaluating and self.eval_phase == 'BETWEEN':
+            if time.monotonic() >= self.next_run_at and self._ready():
+                self._start_next()
         elif self.state == IDLE and not self.started and self.auto_start:
             # headless: start by itself (with the UI the user clicks Start / Start evaluation)
             if self._ready():
@@ -324,17 +385,18 @@ class SimCtrlNode(Node):
                 self.finish_run('timeout')
 
     def _ready(self):
-        """vehicle_sim is up (subscribes /reset) and, unless disabled, a driver
-        is up (subscribes /path). Logs what is missing every 5 s."""
-        sim_up = self.reset_pub.get_subscription_count() >= 1
-        driver_up = not self.wait_driver or self.path_pub.get_subscription_count() >= 1
+        """Check vehicle feedback/reset and driver path/control endpoints.
+        Logs missing connections every 5 s; wait_for_driver can bypass the driver check."""
+        counts = self.connections()
+        sim_up = counts['reset_subs'] >= 1 and counts['state_pubs'] >= 1
+        driver_up = not self.wait_driver or (counts['path_subs'] >= 1 and counts['ctrl_pubs'] >= 1)
         if sim_up and driver_up:
             return True
         now = self.now_s()
         if now - getattr(self, '_last_wait_log', 0.0) >= 5.0:
             self._last_wait_log = now
             missing = [n for n, up in (('vehicle_sim', sim_up),
-                                       ('a driver subscribed to /path', driver_up)) if not up]
+                                       ('a driver subscribed to /path and publishing /veh_ctrl', driver_up)) if not up]
             self.get_logger().info(f"Waiting for {' and '.join(missing)} "
                                    f"(ROS_DOMAIN_ID={os.environ.get('ROS_DOMAIN_ID', '0')})...")
         return False
@@ -350,7 +412,8 @@ class SimCtrlNode(Node):
             self.act_hist.append((self.plot_time(), msg.velocity, msg.steer))
 
     def _begin_running(self):
-        """Call with self.lock held."""
+        """Call with self.lock held. Start projection from the reset position."""
+        self.proj.reset()
         self.t_start = self.now_s()
         self.state = RUNNING
 
@@ -378,7 +441,11 @@ class SimCtrlNode(Node):
     def on_state(self, msg: VehState):
         with self.lock:
             self.veh = (msg.x, msg.y, msg.yaw)
-            if self.state == SETTLING and self._is_post_reset(msg):
+            if self.state == SETTLING:
+                # Feedback from the previous path can arrive while /reset is
+                # in flight. Do not let it advance the new path's projector.
+                if not self._is_post_reset(msg):
+                    return
                 self._begin_running()   # start the clock as soon as the reset took effect
             # display data, also between runs (the car is always driven)
             if not self.trail or math.hypot(msg.x - self.trail[-1][0],
@@ -444,14 +511,20 @@ class SimCtrlNode(Node):
             f'time {elapsed:.2f} s')
 
         if self.run_queue:
-            self._start_next()
+            if self.evaluating:
+                # Keep the result visible briefly; physics continues normally.
+                self.publish_no_task()
+                self.eval_phase = 'BETWEEN'
+                self.next_run_at = time.monotonic() + self.inter_run_delay
+            else:
+                self._start_next()
             return
         if self.evaluating:
-            # evaluation over: take the task away so the driver stops the car
+            self.eval_phase = 'COMPLETE'
             self.publish_no_task()
             self.get_logger().info('Evaluation finished: no task published, driver should stop.')
         if reason != 'aborted' or len(self.results) > 1:
-            self._report()
+            self._save_session_report()
         if self.shutdown_on_finish and reason != 'aborted':
             self.finished = True
 
@@ -498,8 +571,12 @@ class SimCtrlNode(Node):
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             with open(path, 'w') as f:
                 json.dump({'time': time.strftime('%Y-%m-%d %H:%M:%S'),
+                           'status': self.eval_phase.lower(),
+                           'planned_runs': self.run_total, 'completed_runs': len(res),
+                           'plan': {'shapes': self.eval_shapes, 'repeats': self.eval_runs},
                            'overall_score': round(avg, 2), 'per_path': summary,
                            'runs': res}, f, indent=2)
+            self.report_path = os.path.abspath(path)
             png = os.path.splitext(path)[0] + '.png'
             try:
                 from thr_sim.eval_report import save_report_png

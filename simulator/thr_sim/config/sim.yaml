@@ -46,7 +46,8 @@ sim_ctrl:
     tracking_weight: 0.4  # share of the 100 points for tracking
     time_weight: 0.4      # share for time; stop gets the rest (0.2)
     time_v_max: 30.0      # time points = max * min(v_eq, this) / this, v_eq = path / time [m/s]
-    # evaluate mode (evaluate.sh / Evaluate button)
+    # evaluate mode (evaluate.bash / Evaluate button)
+    inter_run_delay: 2.0  # show the completed result before the next evaluation test [s]
     eval_mode: false
     eval_shapes: straight,wave,lane_change,circle
     results_file: ''      # JSON summary written here after an evaluation

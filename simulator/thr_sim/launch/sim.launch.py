@@ -1,7 +1,7 @@
 """Launch the simulator: vehicle sim + sim controller (no driver).
 
-Start a driver separately (e.g. `ros2 launch thr_driver driver.launch.py`)
-or use `ros2 launch thr_driver demo.launch.py` to start both.
+Implement a driver in your own package and start it separately,
+e.g. `ros2 run my_driver driver`. This launch starts only the simulator.
 
 Examples:
     ros2 launch thr_sim sim.launch.py                      # with UI, press Start
