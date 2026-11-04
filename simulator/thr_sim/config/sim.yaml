@@ -1,0 +1,55 @@
+vehicle_sim:
+  ros__parameters:
+    dt: 0.01              # integration step [s]
+    publish_rate: 50.0    # /veh_state rate [Hz]
+    cmd_timeout: 0.5      # zero speed if no /veh_ctrl for this long [s]
+    wheelbase: 2.5        # [m]
+    max_steer: 0.6        # [rad]
+    max_steer_rate: 1.0   # [rad/s]
+    max_speed: 30.0       # [m/s]
+    max_accel: 20.0        # [m/s^2]
+    max_decel: 6.0        # [m/s^2]
+    # PI loops cmd -> actual (integrator plant): kp = 2*zeta*wn, ki = wn^2
+    speed_kp: 8.0         # zeta 0.8, wn 3 rad/s
+    speed_ki: 9.0
+    steer_kp: 4.0       # zeta 0.8, wn 10 rad/s
+    steer_ki: 50.0
+    # actuator noise added to the PI outputs (colored Gaussian, 0 = off)
+    speed_noise_std: 0.1  # [m/s]
+    steer_noise_std: 0.02  # [rad] (~0.3 deg)
+    noise_tau: 0.2        # correlation time [s]
+    noise_seed: -1        # -1 = random; >= 0 = same noise every run
+    init_x: 0.0
+    init_y: 0.0
+    init_yaw: 0.0
+
+sim_ctrl:
+  ros__parameters:
+    path_shape: wave      # straight | wave | lane_change | circle
+    path_length: 60.0     # [m] x extent up to the finish node (not used by circle)
+    runout_length: 20.0   # after-finish segment [m]
+    path_ds: 0.5          # node spacing [m]
+    wave_amplitude: 3.0
+    wave_length: 30.0
+    circle_radius: 15.0
+    lane_width: 4.0
+    max_cte: 2.0          # off-track limit [m]
+    time_limit: 60.0      # per run [s]
+    num_runs: 1
+    wait_for_driver: true # auto runs / evaluation wait for a /path subscriber (the driver)
+    settle_time: 0.5      # max wait for the post-reset state before the clock starts [s]
+    # stop detection and scoring
+    stop_hold: 1.0        # at rest this long = stopped [s]
+    stop_eps: 0.05        # at rest = moved less than this [m]
+    stop_free_zone: 5.0   # full stop points when stopping within this distance of the finish [m]
+    stop_penalty: 5.0     # stop points lost per metre beyond stop_free_zone
+    tracking_weight: 0.4  # share of the 100 points for tracking
+    time_weight: 0.4      # share for time; stop gets the rest (0.2)
+    time_v_max: 30.0      # time points = max * min(v_eq, this) / this, v_eq = path / time [m/s]
+    # evaluate mode (evaluate.sh / Evaluate button)
+    eval_mode: false
+    eval_shapes: straight,wave,lane_change,circle
+    results_file: ''      # JSON summary written here after an evaluation
+    shutdown_on_finish: false
+    auto_start: true      # start runs without the UI (launch sets this from gui)
+    gui: false            # launch file overrides (gui:=true by default)
