@@ -7,8 +7,8 @@ feedback; your node sends speed and steering commands.
 
 ## What you need to implement
 
-Create your own Python `ament_python` package, for example `my_driver`, containing
-a ROS 2 node that:
+Create your own **C++ `ament_cmake` package** (using `rclcpp`), for example
+`my_driver`, containing a ROS 2 node that:
 
 1. Receives the reference path from `/path`.
 2. Receives the car's position and heading from `/veh_state`.
@@ -20,13 +20,23 @@ a ROS 2 node that:
 Implement the controller in your package. Communicate through ROS topics; do not
 import the simulator's Python modules or change its messages, vehicle parameters,
 paths or scoring to improve your score. An optional [demo_driver](demo_driver/README.md)
-shows the simplest working example; use it to understand the topics, then implement
-your own homework package. Run **only one driver at a time**, otherwise their
-control commands compete.
+shows the simplest working example in Python; use it to understand the topics and
+the baseline method, then write your own homework package in C++. Run **only one
+driver at a time**, otherwise their control commands compete.
 
 You do not need to implement perception, vehicle physics, actuator PI loops or
 the UI. A simple controller is enough to begin: first make straight-path driving
 work, then add steering, progress tracking and stopping.
+
+### Homework goals
+
+1. **C++ driver (required).** Implement the driver as a C++ package that drives
+   all four paths (`straight`, `wave`, `lane_change`, `circle`), stops near the
+   finish, obeys empty paths and survives many runs without restarting. Porting
+   the demo driver's method to C++ is an acceptable first milestone.
+2. **Better controller (scored).** Improve the control algorithm so your
+   `./evaluate.bash` overall score is clearly higher than the demo baseline. See
+   [Improve your score](#improve-your-score) for where the points are.
 
 ## First build and run
 
@@ -142,13 +152,13 @@ input means the driver/user publishes it; output means the simulator publishes i
 
 ### Minimum interface for YOUR driver
 
-| In your node | Topic | Python message import | What to do |
+| In your node | Topic | C++ header / type | What to do |
 |---|---|---|---|
-| Subscribe | `/path` | `from thr_sim_msgs.msg import RefPath` | Store ordered nodes and `finish_index`; an empty path means stop |
-| Subscribe | `/veh_state` | `from thr_sim_msgs.msg import VehState` | Read `x`, `y`, `yaw` for steering and progress |
-| Subscribe | `/reset` | `from std_msgs.msg import Empty` | Clear progress and controller memory for the next run |
-| Publish | `/veh_ctrl` | `from thr_sim_msgs.msg import VehCtrl` | Send `velocity` in m/s and `steer` in radians continuously |
-| Subscribe (optional) | `/veh_actual` | `from thr_sim_msgs.msg import VehCtrl` | Read actual velocity/steering for feedback |
+| Subscribe | `/path` | `thr_sim_msgs/msg/ref_path.hpp` → `thr_sim_msgs::msg::RefPath` | Store ordered nodes and `finish_index`; an empty path means stop |
+| Subscribe | `/veh_state` | `thr_sim_msgs/msg/veh_state.hpp` → `thr_sim_msgs::msg::VehState` | Read `x`, `y`, `yaw` for steering and progress |
+| Subscribe | `/reset` | `std_msgs/msg/empty.hpp` → `std_msgs::msg::Empty` | Clear progress and controller memory for the next run |
+| Publish | `/veh_ctrl` | `thr_sim_msgs/msg/veh_ctrl.hpp` → `thr_sim_msgs::msg::VehCtrl` | Send `velocity` in m/s and `steer` in radians continuously |
+| Subscribe (optional) | `/veh_actual` | `thr_sim_msgs/msg/veh_ctrl.hpp` → `thr_sim_msgs::msg::VehCtrl` | Read actual velocity/steering for feedback |
 
 ```text
 Simulator  -- /path, /veh_state, /veh_actual, /reset -->  Your driver
@@ -442,95 +452,119 @@ packages recursively; this workspace does not require a `src/` directory.
 ```bash
 cd ~/THRSimSimple
 source /opt/ros/humble/setup.bash
-ros2 pkg create my_driver --build-type ament_python \
-  --dependencies rclpy std_msgs thr_sim_msgs
+source install/setup.bash   # so ros2 pkg create can find thr_sim_msgs
+ros2 pkg create my_driver --build-type ament_cmake \
+  --dependencies rclcpp std_msgs thr_sim_msgs
 ```
 
-Create `my_driver/my_driver/driver_node.py`. The following skeleton sets up the
+Create `my_driver/src/driver_node.cpp`. The following skeleton sets up the
 communication only. **It commands zero speed until you implement the TODO.**
 
-```python
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
-from std_msgs.msg import Empty
-from thr_sim_msgs.msg import RefPath, VehCtrl, VehState
+```cpp
+#include <chrono>
+#include <memory>
+#include <optional>
+#include <vector>
 
+#include "geometry_msgs/msg/point.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/empty.hpp"
+#include "thr_sim_msgs/msg/ref_path.hpp"
+#include "thr_sim_msgs/msg/veh_ctrl.hpp"
+#include "thr_sim_msgs/msg/veh_state.hpp"
 
-class Driver(Node):
-    def __init__(self):
-        super().__init__('my_driver')
-        self.nodes = []
-        self.finish_index = 0
-        self.state = None
-        self.progress_index = 0
+using namespace std::chrono_literals;
+using thr_sim_msgs::msg::RefPath;
+using thr_sim_msgs::msg::VehCtrl;
+using thr_sim_msgs::msg::VehState;
 
-        # /path is retained: receive the latest task even if connecting late.
-        path_qos = QoSProfile(
-            depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            reliability=ReliabilityPolicy.RELIABLE,
-        )
-        self.create_subscription(RefPath, '/path', self.on_path, path_qos)
-        self.create_subscription(VehState, '/veh_state', self.on_state, 10)
-        self.create_subscription(Empty, '/reset', self.on_reset, 10)
-        self.publisher = self.create_publisher(VehCtrl, '/veh_ctrl', 10)
-        self.create_timer(0.05, self.control)  # 20 Hz
+class Driver : public rclcpp::Node
+{
+public:
+  Driver()
+  : Node("my_driver")
+  {
+    // /path is retained: receive the latest task even if connecting late.
+    auto path_qos = rclcpp::QoS(1).reliable().transient_local();
+    path_sub_ = create_subscription<RefPath>(
+      "/path", path_qos, [this](const RefPath & msg) {on_path(msg);});
+    state_sub_ = create_subscription<VehState>(
+      "/veh_state", 10, [this](const VehState & msg) {state_ = msg;});
+    reset_sub_ = create_subscription<std_msgs::msg::Empty>(
+      "/reset", 10, [this](const std_msgs::msg::Empty &) {on_reset();});
+    publisher_ = create_publisher<VehCtrl>("/veh_ctrl", 10);
+    timer_ = create_wall_timer(50ms, [this]() {control();});  // 20 Hz
+  }
 
-    def on_path(self, msg):
-        self.nodes = list(msg.nodes)
-        self.finish_index = msg.finish_index
-        self.progress_index = 0
-        # TODO: also clear any controller memory for this new task.
+private:
+  void on_path(const RefPath & msg)
+  {
+    nodes_ = msg.nodes;
+    finish_index_ = msg.finish_index;
+    progress_index_ = 0;
+    // TODO: also clear any controller memory for this new task.
+  }
 
-    def on_state(self, msg):
-        self.state = msg
+  void on_reset()
+  {
+    state_.reset();  // wait for fresh vehicle feedback after the reset
+    progress_index_ = 0;
+    // Keep the current path: /path and /reset may arrive in either order.
+    // TODO: clear integrators, filters and other controller memory.
+  }
 
-    def on_reset(self, _msg):
-        self.state = None  # wait for fresh vehicle feedback after the reset
-        self.progress_index = 0
-        # Keep the current path: /path and /reset may arrive in either order.
-        # TODO: clear integrators, filters and other controller memory.
+  void control()
+  {
+    double velocity = 0.0, steer = 0.0;
+    if (nodes_.size() >= 2 && state_ && finish_index_ < nodes_.size()) {
+      // TODO: calculate velocity and steer using the path and state.
+      // The stopping target is nodes_[finish_index_].
+    }
 
-    def control(self):
-        velocity, steer = 0.0, 0.0
-        if (len(self.nodes) >= 2 and self.state is not None
-                and 0 <= self.finish_index < len(self.nodes)):
-            # TODO: calculate velocity and steer using the path and state.
-            # The stopping target is self.nodes[self.finish_index].
-            pass
+    // Continue publishing zero while waiting or when the task is empty.
+    VehCtrl msg;
+    msg.header.stamp = now();
+    msg.velocity = velocity;
+    msg.steer = steer;
+    publisher_->publish(msg);
+  }
 
-        # Continue publishing zero while waiting or when the task is empty.
-        msg = VehCtrl()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.velocity = float(velocity)
-        msg.steer = float(steer)
-        self.publisher.publish(msg)
+  std::vector<geometry_msgs::msg::Point> nodes_;
+  size_t finish_index_ = 0;
+  size_t progress_index_ = 0;
+  std::optional<VehState> state_;
 
+  rclcpp::Subscription<RefPath>::SharedPtr path_sub_;
+  rclcpp::Subscription<VehState>::SharedPtr state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub_;
+  rclcpp::Publisher<VehCtrl>::SharedPtr publisher_;
+  rclcpp::TimerBase::SharedPtr timer_;
+};
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = Driver()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.try_shutdown()
+int main(int argc, char ** argv)
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<Driver>());
+  rclcpp::shutdown();
+  return 0;
+}
 ```
 
-In the generated `my_driver/setup.py`, add this entry to `console_scripts`:
+In the generated `my_driver/CMakeLists.txt`, add these lines after the
+`find_package(...)` calls and before `if(BUILD_TESTING)`:
 
-```python
-entry_points={
-    'console_scripts': [
-        'driver = my_driver.driver_node:main',
-    ],
-},
+```cmake
+add_executable(driver src/driver_node.cpp)
+target_compile_features(driver PUBLIC cxx_std_17)
+ament_target_dependencies(driver rclcpp std_msgs thr_sim_msgs)
+install(TARGETS driver DESTINATION lib/${PROJECT_NAME})
 ```
 
-Keep the other generated setup fields. Build and source the workspace again:
+Keep the other generated lines. As your controller grows, put the maths in its
+own files (for example `src/controller.cpp` with `include/my_driver/controller.hpp`)
+and add them to `add_executable`; a pure function such as
+`compute_command(path, finish_index, pose, ...)` is easy to unit-test with
+`ament_cmake_gtest`. Build and source the workspace again:
 
 ```bash
 cd ~/THRSimSimple
@@ -573,12 +607,46 @@ a short explanation of your controller and chosen parameters, and an evaluation
 result with notes on any failing scenarios. Follow any additional instructions
 from your team lead.
 
+## Improve your score
+
+For reference, the demo method (4 m lookahead, P steering, constant speed)
+scores about **62/100** at 3 m/s: tracking ≈ 38/40 and stop 20/20 on every
+path, but time only ≈ 4/40 because v_eq ≈ 3 m/s. Simply raising the speed does
+not work: at 15 m/s the same controller leaves the corridor on every path and
+scores ≈ 21. The time score is linear in v_eq up to 30 m/s, so most of the
+remaining points come from **driving faster without losing tracking or the stop**.
+
+Ideas, roughly in order of payoff:
+
+- **Speed profile.** Go fast on straights and slow for curvature: limit speed
+  so lateral acceleration `v² · κ` stays reasonable, and plan braking so that
+  `v ≤ sqrt(2 · a_brake · distance_to_finish)`. The vehicle brakes at most
+  `max_decel` (6 m/s²) and its speed PI loop lags, so leave margin.
+- **Better steering law.** Pure pursuit (`δ = atan(2 L sin α / ld)`, L = 2.5 m)
+  or Stanley, with a lookahead that grows with speed. Use `/veh_actual` for the
+  actual speed.
+- **Continuous path geometry.** Project the car onto path segments (not only
+  the nearest node) for smoother cross-track error and distance-to-finish.
+- **Latency and actuator limits.** Steering moves at most 1 rad/s and both
+  loops are noisy; predicting the pose a little ahead, or feed-forward steering
+  from path curvature, reduces overshoot at speed.
+- **Tuning discipline.** Change one parameter at a time, evaluate with
+  `./evaluate.bash -n 3` (noise makes single runs vary), and keep the JSON
+  reports to compare. Expose gains as ROS parameters
+  (`declare_parameter`) so you can tune with `--ros-args -p name:=value`
+  without rebuilding.
+
+A run that goes `off_track`, `overrun` or `timeout` gets 0 time and 0 stop
+points, so robustness on all four paths matters more than the top speed on one.
+
 ## Troubleshooting
 
 | Symptom | What to check |
 |---|---|
 | `ament_cmake` cannot be found | Run `source /opt/ros/humble/setup.bash` before building |
 | `Package 'my_driver' not found` | Build the package, then source `install/setup.bash` in that terminal |
+| C++ change has no effect | `--symlink-install` does not apply to compiled code: run `colcon build --packages-select my_driver` again and restart the node |
+| `thr_sim_msgs/msg/ref_path.hpp` not found | Add `thr_sim_msgs` to `find_package`, `ament_target_dependencies` and `package.xml` (`<depend>`); build the whole workspace once |
 | Driver connects but gets no path | Subscribe using `RefPath` and the transient-local QoS shown above; click Start |
 | Evaluation keeps waiting for a driver | Check your `/path` subscription, matching `ROS_DOMAIN_ID`, and sourced workspace |
 | Car moves before Start or after Stop | Handle empty paths and publish zero velocity while no task is active |
