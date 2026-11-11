@@ -45,3 +45,6 @@ Thumbs.db
 # Crash dumps
 core
 core.[0-9]*
+
+
+demo_driver_cpp/

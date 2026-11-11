@@ -25,8 +25,8 @@ Score (max 100) = tracking points + time points + stop points, with maxima
     tracking = completion * max(0, 1 - rms_cte / max_cte)
         completion = progress up to the finish node / distance to the finish node
     time = min(v_eq, time_v_max) / time_v_max, linear in the
-        equivalent speed v_eq = distance to the finish node / run time
-        (run time = start until the car came to rest; 0 unless `stopped`)
+        equivalent speed v_eq = distance to the finish node / time to finish
+        (0 unless the run ended `stopped` after reaching the finish)
     stop points = full within stop_free_zone of the finish node, minus
         stop_penalty points per metre beyond it, >= 0
         (distance measured along the path; 0 unless the run ended `stopped`)
@@ -80,7 +80,7 @@ class SimCtrlNode(Node):
         self.w_track = p('tracking_weight', 0.4).value  # share of the 100 points
         self.w_time = p('time_weight', 0.4).value       # stop gets 1 - both
         self.w_stop = max(0.0, 1.0 - self.w_track - self.w_time)
-        self.time_v_max = p('time_v_max', 30.0).value   # full time points at this v_eq [m/s]
+        self.time_v_max = p('time_v_max', 20.0).value   # full time points at this v_eq [m/s]
         self.eval_mode = p('eval_mode', False).value
         self.inter_run_delay = max(0.0, p('inter_run_delay', 2.0).value)
         self.eval_shapes = [s.strip() for s in p('eval_shapes', ','.join(PATH_SHAPES)).value
@@ -208,6 +208,8 @@ class SimCtrlNode(Node):
 
     def _reset_run_stats(self):
         self.progress = 0.0
+        self.progress_time = 0.0
+        self.finish_time = None
         self.sq_cte_sum = 0.0
         self.max_abs_cte = 0.0
         self.n_samples = 0
@@ -458,11 +460,23 @@ class SimCtrlNode(Node):
             if self.state != RUNNING:
                 return
             # scoring, only during a run
+            previous_progress = self.progress
+            previous_progress_time = self.progress_time
             self.progress = max(self.progress, s)
             self.sq_cte_sum += cte * cte
             self.max_abs_cte = max(self.max_abs_cte, abs(cte))
             self.n_samples += 1
             t = self.elapsed()
+            if self.finish_time is None and self.progress >= self.s_finish:
+                if previous_progress < self.s_finish and self.progress > previous_progress:
+                    fraction = (self.s_finish - previous_progress) / (
+                        self.progress - previous_progress)
+                    self.finish_time = previous_progress_time + fraction * (
+                        t - previous_progress_time)
+                else:
+                    self.finish_time = t
+            if self.progress > previous_progress:
+                self.progress_time = t
             self.cur.update(progress=min(1.0, self.progress / self.s_finish),
                             rms_cte=math.sqrt(self.sq_cte_sum / self.n_samples), time=t)
             stopped = self._at_rest(t, msg.x, msg.y) and self.progress >= MOVED_DIST
@@ -482,9 +496,12 @@ class SimCtrlNode(Node):
         stop_err = None if s_stop is None else s_stop - self.s_finish
         stop = timing = v_eq = 0.0
         if reason == 'stopped':
-            stop = self.stop_fraction(stop_err)
-            v_eq = self.s_finish / elapsed if elapsed > 0 else 0.0
-            timing = self.time_fraction(v_eq)
+            if self.progress >= self.s_finish:
+                stop = self.stop_fraction(stop_err)
+            if self.finish_time is not None:
+                v_eq = self.s_finish / self.finish_time if self.finish_time > 0 else 0.0
+                timing = self.time_fraction(v_eq)
+
         score = 100.0 * (self.w_track * tracking + self.w_time * timing + self.w_stop * stop)
         result = {
             'run': self.run_idx, 'shape': self.shape, 'result': reason,

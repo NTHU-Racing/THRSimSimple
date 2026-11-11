@@ -511,9 +511,9 @@ Score (max 100) = Tracking (max {wt:.0f}) + Time (max {wv:.0f}) + Stop (max {ws:
     completion  share of the path up to the finish node that was driven (0..1)
     RMS error   root-mean-square distance from the path during the run
 
-  Time = {wv:.0f} x min(v_eq, {n.time_v_max:.0f}) / {n.time_v_max:.0f}          (only if 'stopped')
-    v_eq        equivalent speed = path length to the finish node / run time
-    run time    from the start until the car came to rest
+    Time = {wv:.0f} x min(v_eq, {n.time_v_max:.0f}) / {n.time_v_max:.0f}          (only if 'stopped' after finish)
+        v_eq        equivalent speed = path length to the finish node / finish time
+        finish time from the start until the car crossed the finish node
     linear:     {n.time_v_max / 3:.0f} m/s -> {wv / 3:.1f},  {n.time_v_max / 2:.0f} m/s -> {wv / 2:.1f},  {n.time_v_max:.0f} m/s -> {wv:.0f} points
 
   Stop = {ws:.0f} points if |stop error| <= {n.stop_free:.1f} m,
@@ -522,7 +522,7 @@ Score (max 100) = Tracking (max {wt:.0f}) + Time (max {wv:.0f}) + Stop (max {ws:
     stop error  distance along the path from the finish node to where the
                 car stopped (- = short of it, + = past it)
 
-  Example: {L:.0f} m path, RMS error 0.10 m, at rest after {t:.0f} s, {e:.1f} m past the finish
+    Example: {L:.0f} m path, RMS error 0.10 m, finish crossed after {t:.0f} s, stopped {e:.1f} m past it
     Tracking = {f'{wt:.0f} x 1 x (1 - 0.10/{n.max_cte:.1f})':<26} = {ex_track:5.1f}
     Time     = {f'{wv:.0f} x {L / t:.0f}/{n.time_v_max:.0f}':<26} = {ex_time:5.1f}   (v_eq = {L:.0f} m / {t:.0f} s = {L / t:.0f} m/s)
     Stop     = {f'{ws:.0f} - {n.stop_penalty:.0f} x ({e:.1f} - {n.stop_free:.1f})':<26} = {ex_stop:5.1f}
@@ -856,17 +856,21 @@ Evaluation
             self.cte_line.set_data([], [])
         if ctrl_hist is not None:
             w = ctrl_hist[ctrl_hist[:, 0] >= t_now - TIME_WINDOW]
-            steer_deg = np.degrees(w[:, 2])
-            self.v_line.set_data(w[:, 0] - t_now, w[:, 1])
-            self.steer_line.set_data(w[:, 0] - t_now, steer_deg)
-            # Limits only ever grow (in coarse steps), so they rarely force a redraw.
-            v_lo, v_hi = self.ax_v.get_ylim()
-            vmax = max(v_hi, 2.0 * math.ceil(w[:, 1].max() * 1.1 / 2.0))
-            vmin = min(v_lo, -2.0 * math.ceil(max(0.0, -w[:, 1].min()) * 1.1 / 2.0))
-            self._set_lim(self.ax_v, 'y', vmin, vmax)
-            lim = max(self.ax_steer.get_ylim()[1],
-                      10.0 * math.ceil(np.abs(steer_deg).max() * 1.1 / 10.0))
-            self._set_lim(self.ax_steer, 'y', -lim, lim)
+            if len(w):
+                steer_deg = np.degrees(w[:, 2])
+                self.v_line.set_data(w[:, 0] - t_now, w[:, 1])
+                self.steer_line.set_data(w[:, 0] - t_now, steer_deg)
+                # Limits only ever grow (in coarse steps), so they rarely force a redraw.
+                v_lo, v_hi = self.ax_v.get_ylim()
+                vmax = max(v_hi, 2.0 * math.ceil(w[:, 1].max() * 1.1 / 2.0))
+                vmin = min(v_lo, -2.0 * math.ceil(max(0.0, -w[:, 1].min()) * 1.1 / 2.0))
+                self._set_lim(self.ax_v, 'y', vmin, vmax)
+                lim = max(self.ax_steer.get_ylim()[1],
+                          10.0 * math.ceil(np.abs(steer_deg).max() * 1.1 / 10.0))
+                self._set_lim(self.ax_steer, 'y', -lim, lim)
+            else:
+                self.v_line.set_data([], [])
+                self.steer_line.set_data([], [])
         else:
             self.v_line.set_data([], [])
             self.steer_line.set_data([], [])

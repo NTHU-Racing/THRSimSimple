@@ -68,9 +68,9 @@ environment or shell options. A sourced launcher prints failures and returns nor
 direct execution retains the launch command's exit status. Neither script launches a
 driver. Your driver stays running across simulator runs and evaluation sessions.
 Both terminals must use the same `ROS_DOMAIN_ID`. The simulator waits for a
-driver. To watch the teaching example before implementing your own, run
-`ros2 run demo_driver driver` in Terminal 1 instead. Stop it before starting your
-own node.
+driver. To watch either teaching example before implementing your own, run
+`ros2 run demo_driver driver` or `ros2 run demo_driver_cpp driver` in Terminal 1
+instead. Stop it before starting your own node.
 
 Both scripts only source the environment and launch; build the workspace yourself
 using the commands above before launching. Auto runs and
@@ -128,6 +128,7 @@ starts automatically when connections are ready, and exits when done.
 | `simulator/thr_sim_msgs` | `VehCtrl` (velocity, steer), `VehState` (x, y, yaw), `RefPath` (nodes, finish index) | – |
 | `simulator/thr_sim` | simulator: `vehicle_sim`, `sim_ctrl` (+ UI), `sim.launch.py`, `sim.yaml` | `thr_sim_msgs` |
 | `demo_driver` | optional teaching example: fixed lookahead, P steering, constant low speed | `rclpy`, `std_msgs`, `thr_sim_msgs` |
+| `demo_driver_cpp` | C++ version of the optional teaching example | `rclcpp`, `std_msgs`, `thr_sim_msgs` |
 
 The simulator and the driver only talk through ROS topics; neither imports
 the other's code.
@@ -340,9 +341,10 @@ A run ends with
 
 - tracking = 40 × completion × max(0, 1 − RMS cross-track error / `max_cte`),
   completion = progress up to the finish node
-- time = 40 × min(v_eq, 30) / 30, linear in the equivalent speed
-  v_eq = path length to the finish node / run time (start until the car came
-  to rest); `time_v_max` = 30 m/s; 0 unless the run ended `stopped`
+- time = 40 × min(v_eq, 20) / 20, linear in the equivalent speed
+  v_eq = path length to the finish node / time from run start until crossing
+  the finish node; `time_v_max` = 20 m/s; 0 unless the run ended `stopped`
+  after reaching the finish
 - stop = the full 20 when the car stops within `stop_free_zone` (5 m) of the
   finish node, then `stop_penalty` (5) points less per metre beyond that, so
   0 from 9 m; distance measured along the path, short or past; 0 unless the
