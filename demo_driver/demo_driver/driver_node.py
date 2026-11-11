@@ -44,7 +44,7 @@ def control_command(points, finish_index, pose, index, speed=3.0,
 class DemoDriver(Node):
     def __init__(self):
         super().__init__('demo_driver')
-        self.speed = self.declare_parameter('speed', 15.0).value       # m/s
+        self.speed = self.declare_parameter('speed', 3.0).value      # m/s
         self.lookahead = self.declare_parameter('lookahead', 4.0).value  # m
         self.gain = self.declare_parameter('gain', 1.0).value
         self.points, self.finish_index, self.index, self.pose = [], 0, 0, None
