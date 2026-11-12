@@ -79,7 +79,7 @@ direct execution retains the launch command's exit status. Neither script launch
 driver. Your driver stays running across simulator runs and evaluation sessions.
 Both terminals must use the same `ROS_DOMAIN_ID`. The simulator waits for a
 driver. To watch either teaching example before implementing your own, run
-`ros2 run demo_driver driver` or `ros2 run demo_driver_cpp driver` in Terminal 1
+`ros2 run demo_driver driver` in Terminal 1
 instead. Stop it before starting your own node.
 
 Both scripts only source the environment and launch; build the workspace yourself
@@ -138,7 +138,7 @@ starts automatically when connections are ready, and exits when done.
 | `simulator/thr_sim_msgs` | `VehCtrl` (velocity, steer), `VehState` (x, y, yaw), `RefPath` (nodes, finish index) | – |
 | `simulator/thr_sim` | simulator: `vehicle_sim`, `sim_ctrl` (+ UI), `sim.launch.py`, `sim.yaml` | `thr_sim_msgs` |
 | `demo_driver` | optional teaching example: fixed lookahead, P steering, constant low speed | `rclpy`, `std_msgs`, `thr_sim_msgs` |
-| `demo_driver_cpp` | C++ version of the optional teaching example | `rclcpp`, `std_msgs`, `thr_sim_msgs` |
+
 
 The simulator and the driver only talk through ROS topics; neither imports
 the other's code.
